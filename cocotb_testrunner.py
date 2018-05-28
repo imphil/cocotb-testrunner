@@ -15,6 +15,7 @@ import glob
 import argparse
 import subprocess
 import xml.etree.ElementTree as ET
+import itertools as it
 
 tests = []
 objdir = None
@@ -62,6 +63,8 @@ class CocotbTest:
         self._manifest_path = None
         self.manifest = None
         self.objdir = None
+        self.test_combinations = []
+        self.testno = 1
 
         self.manifest_path = manifest_path
 
@@ -94,6 +97,18 @@ class CocotbTest:
                     manifest['include_dirs'])
 
         manifest['manifest_dir'] = os.path.abspath(manifest_dir)
+
+        # read all HDL parameters (passed to toplevel module in the design)
+        parameters = {}
+        if "parameters" in manifest:
+            for name, value in manifest["parameters"].items():
+                parameters[name] = value if type(value) is list else [value]
+                self.testno *= len(value) if type(value) is list else 1
+
+        # create a list with all combinations of the parameters
+        param_names = sorted(parameters)
+        self.test_combinations = [dict(zip(param_names, prod)) for prod in it.product(*(parameters[param_name] for param_name in param_names))]
+
         return manifest
 
     @property
@@ -120,8 +135,8 @@ class CocotbTest:
 
         # HDL parameters (passed to toplevel module in the design)
         args_hdl_params = []
-        if "parameters" in self.manifest:
-            for name, value in self.manifest["parameters"].items():
+        if len(self.test_combinations) > 0:
+            for name, value in self.test_combinations[self.testno-1].items():
                 args_hdl_params.append("-pvalue+{}={}".format(self.manifest["toplevel"]+'.'+name, value))
 
         args_incdirs = []
@@ -176,9 +191,7 @@ class CocotbTest:
 
         return {'any_failed': any_failed, 'results': results}
 
-    def run(self, gui, loglevel='INFO', seed=None, testcase=None):
-        self._prepare_objdir()
-
+    def run(self, gui, loglevel='INFO', seed=None, testcase=None, rebuild=False):
         env = os.environ
         env['PYTHONPATH'] = self.manifest['manifest_dir']
         env['COCOTB_LOG_LEVEL'] = loglevel
@@ -186,17 +199,33 @@ class CocotbTest:
         if testcase:
             env['TESTCASE'] = testcase
 
-        make_args = []
-        sim_args = ""
-        if gui:
-            sim_args = "-gui"
+        if self.testno > 1:
+            rebuild = True
 
-        make_args.append("SIM_ARGS=%s" % sim_args)
+        if (gui or testcase) and self.testno > 1:
+            print("Running multiple tests at once is not possible with "
+                  "-g/--gui or -t/--testcase.\nPlease run again with a single "
+                  "test.")
+            exit(1)
 
-        if seed:
-            make_args.append("RANDOM_SEED=%d" % seed)
+        while self.testno > 0:
+            if rebuild:
+                subprocess.run(["rm", "-rf", self.objdir+"/sim_build"])
 
-        subprocess.run(["make"] + make_args, cwd=self.objdir, env=env)
+            self._prepare_objdir()
+            make_args = []
+            sim_args = ""
+            if gui:
+                sim_args = "-gui"
+
+            make_args.append("SIM_ARGS=%s" % sim_args)
+
+            if seed:
+                make_args.append("RANDOM_SEED=%d" % seed)
+
+            subprocess.run(["make"] + make_args, cwd=self.objdir, env=env)
+
+            self.testno -= 1
 
         return self._collect_results()
 
@@ -205,7 +234,7 @@ class CocotbTestRunner:
         self.objdir = objdir
         self.tests = []
 
-    def run_tests(self, gui=False, loglevel='INFO', seed=None, testcase=None):
+    def run_tests(self, gui=False, loglevel='INFO', seed=None, testcase=None, rebuild=False):
         """
         Run all discovered tests
 
@@ -222,7 +251,7 @@ class CocotbTestRunner:
         for t in self.tests:
             t.objdir = os.path.join(self.objdir, t.manifest['toplevel'])
             ensure_directory(t.objdir, recursive=True)
-            r = t.run(gui, loglevel, seed, testcase)
+            r = t.run(gui, loglevel, seed, testcase, rebuild)
             results = r['results']
             if r['any_failed']:
                 all_tests_successful = False
@@ -261,6 +290,8 @@ if __name__ == '__main__':
                         default='INFO')
     parser.add_argument("-g", "--gui", action='store_true',
                         help="show GUI[default: %(default)s]")
+    parser.add_argument("-f", "--force_build", action='store_true',
+                        help="force vcs to rebuild the module")
     parser.add_argument("--seed", type=int, required=False,
                         help="set a fixed seed for the test run")
     parser.add_argument("-t", "--testcase", required=False,
@@ -281,7 +312,8 @@ if __name__ == '__main__':
     all_tests_successful = testrunner.run_tests(gui=args.gui,
                                                 loglevel=args.loglevel,
                                                 seed=args.seed,
-                                                testcase=args.testcase)
+                                                testcase=args.testcase,
+                                                rebuild=args.force_build)
 
     if all_tests_successful:
         print("\nAll tests successful.")
