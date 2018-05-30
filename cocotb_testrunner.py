@@ -17,6 +17,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 import itertools as it
 import copy
+import multiprocessing
 
 tests = []
 objdir = None
@@ -83,7 +84,7 @@ class CocotbTest:
         Generate Makefile for running cocotb with Synopsys VCS
         """
         makefile = "# Auto-generated Makefile by cocotb_testrunner for Synopsys VCS\n"
-        makefile += "PYTHONPATH := " + pythonpath + ":$(PYTHONPATH)\n"
+        makefile += "PYTHONPATH := " + pythonpath + ":" + self.manifest['manifest_dir'] + "$(PYTHONPATH)\n"
         makefile += "SIM=vcs\n"
         makefile += "VERILOG_SOURCES=" + " \\\n\t".join(self.manifest["sources"]) + "\n"
         makefile += "TOPLEVEL=" + self.manifest["toplevel"] + "\n"
@@ -148,15 +149,8 @@ class CocotbTest:
 
         return {'any_failed': any_failed, 'results': results}
 
-    def run(self, gui, loglevel='INFO', seed=None, testcase=None):
+    def get_call_str(self, gui, loglevel='INFO', seed=None, testcase=None):
         self._prepare_objdir()
-
-        env = os.environ
-        env['PYTHONPATH'] = self.manifest['manifest_dir']
-        env['COCOTB_LOG_LEVEL'] = loglevel
-
-        if testcase:
-            env['TESTCASE'] = testcase
 
         make_args = []
         sim_args = ""
@@ -168,16 +162,36 @@ class CocotbTest:
         if seed:
             make_args.append("RANDOM_SEED=%d" % seed)
 
-        subprocess.run(["make"] + make_args, cwd=self.objdir, env=env)
-
-        return self._collect_results()
+        return "@make -C {} {}".format(self.objdir, ' '.join(make_args))
 
 class CocotbTestRunner:
     def __init__(self, objdir=None):
         self.objdir = objdir
         self.tests = []
 
-    def run_tests(self, gui=False, loglevel='INFO', seed=None, testcase=None):
+    def _create_makefile(self, gui=False, loglevel='INFO', seed=None, testcase=None, jobs=False):
+        call_strings = []
+        for t in self.tests:
+            t.set_objdir(base_dir=self.objdir)
+            ensure_directory(t.objdir, recursive=True)
+            call_strings.append(t.get_call_str(gui, loglevel, seed, testcase))
+
+        makefile_contents = "all: "
+        for i in range(0,len(call_strings)):
+            makefile_contents += "run_test_{} ".format(i+1)
+
+        for i in range(0,len(call_strings)):
+            runtest = "run_test_{}".format(i+1)
+            logfile = " > {}.log 2>&1".format(runtest) if jobs else ""
+            pre_run_message = "\n\t@echo running test {}...".format(i+1) if jobs else ""
+            post_run_message = "\n\t@echo ...test {} finished.".format(i+1) if jobs else ""
+            makefile_contents += "\n\n{}:{}".format(runtest, pre_run_message)
+            makefile_contents += "\n\t{}{}{}".format(call_strings[i], logfile, post_run_message)
+
+        with open("{}/Makefile".format(self.objdir), "w") as fp_makefile:
+            fp_makefile.write(makefile_contents)
+
+    def run_tests(self, gui=False, loglevel='INFO', seed=None, testcase=None, jobs=False):
         """
         Run all discovered tests
 
@@ -191,10 +205,29 @@ class CocotbTestRunner:
 
         all_tests_successful = True
         all_results = []
+
+        # create makefile to run all tests
+        self._create_makefile(gui, loglevel, seed, testcase, jobs)
+
+        env = os.environ
+        env['COCOTB_LOG_LEVEL'] = loglevel
+        if testcase:
+            env['TESTCASE'] = testcase
+
+        make_args = []
+        if jobs:
+            maxjobs = multiprocessing.cpu_count() * 2
+            ntests = len(self.tests)
+            njobs = maxjobs if ntests >= maxjobs else ntests
+            print("Running {} tests using {} jobs...".format(ntests, njobs))
+            make_args.append("-j{}".format(njobs))
+
+        # run tests
+        subprocess.run(["make"] + make_args, cwd=self.objdir, env=env)
+
+        # collect results
         for t in self.tests:
-            t.set_objdir(base_dir=self.objdir)
-            ensure_directory(t.objdir, recursive=True)
-            r = t.run(gui, loglevel, seed, testcase)
+            r = t._collect_results()
             results = r['results']
             if r['any_failed']:
                 all_tests_successful = False
@@ -269,7 +302,6 @@ class CocotbTestRunner:
 
         for f in test_manifests:
             manifest, test_combinations = self.parse_manifest(manifest_path=f, all_comb=all_comb)
-#            print("test_combinations: {}".format(test_combinations))
             if len(test_combinations) > 0:
                 for t in test_combinations:
                     manifest["parameters"] = t
@@ -291,6 +323,10 @@ if __name__ == '__main__':
                         help="show GUI[default: %(default)s]")
     parser.add_argument("-a", "--all", action='store_true',
                         help="run tests for all possible parameter combinations")
+    parser.add_argument("-j", "--jobs", action='store_true',
+                        help="run tests in parallel. The number of jobs is twice "
+                        "the number of the processors available. Ignored if only "
+                        "one test is specified.")
     parser.add_argument("--seed", type=int, required=False,
                         help="set a fixed seed for the test run")
     parser.add_argument("-t", "--testcase", required=False,
@@ -311,7 +347,8 @@ if __name__ == '__main__':
     all_tests_successful = testrunner.run_tests(gui=args.gui,
                                                 loglevel=args.loglevel,
                                                 seed=args.seed,
-                                                testcase=args.testcase)
+                                                testcase=args.testcase,
+                                                jobs=args.jobs)
 
     if all_tests_successful:
         print("\nAll tests successful.")
