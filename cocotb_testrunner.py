@@ -16,6 +16,7 @@ import argparse
 import subprocess
 import xml.etree.ElementTree as ET
 import itertools as it
+import copy
 
 tests = []
 objdir = None
@@ -59,66 +60,21 @@ def ensure_directory(dirpath, recursive=True):
 
 
 class CocotbTest:
-    def __init__(self, manifest_path):
-        self._manifest_path = None
-        self.manifest = None
+    def __init__(self, manifest_path, manifest):
         self.objdir = None
-        self.test_combinations = []
-        self.testno = 1
-
         self.manifest_path = manifest_path
+        self.manifest = manifest
 
-    def _abspath(self, path, basedir):
-        """
-        Return the absolute path for |path| relative to |basedir| with all
-        environment variables expanded.
-        """
-        path = os.path.expandvars(path)
-
-        if path.startswith('/'):
-            return path
-        return os.path.abspath(os.path.join(basedir, path))
-
-    def _parse_manifest(self, manifest_path):
-        with open(manifest_path, 'r') as fp_manifest:
-            try:
-                manifest = yaml.safe_load(fp_manifest)
-            except yaml.YAMLError as e:
-                print(e)
-                return False
-
-        # ensure absolute paths in the list of sources
-        manifest_dir = os.path.dirname(manifest_path)
-        manifest['sources'][:] = map(lambda x: self._abspath(x, manifest_dir),
-                                     manifest['sources'])
-        if 'include_dirs' in manifest:
-            manifest['include_dirs'][:] =\
-                map(lambda x: self._abspath(x, manifest_dir),
-                    manifest['include_dirs'])
-
-        manifest['manifest_dir'] = os.path.abspath(manifest_dir)
-
-        # read all HDL parameters (passed to toplevel module in the design)
-        parameters = {}
-        if "parameters" in manifest:
-            for name, value in manifest["parameters"].items():
-                parameters[name] = value if type(value) is list else [value]
-                self.testno *= len(value) if type(value) is list else 1
-
-        # create a list with all combinations of the parameters
-        param_names = sorted(parameters)
-        self.test_combinations = [dict(zip(param_names, prod)) for prod in it.product(*(parameters[param_name] for param_name in param_names))]
-
-        return manifest
-
-    @property
-    def manifest_path(self):
-        return self._manifest_path
-
-    @manifest_path.setter
-    def manifest_path(self, manifest_path):
-        self.manifest = self._parse_manifest(manifest_path)
-        self._manifest_path = manifest_path
+    def set_objdir(self, base_dir):
+        sub_dir = ""
+        if "parameters" in self.manifest:
+            param_names = sorted(self.manifest["parameters"])
+            for p in param_names:
+                sub_dir += "{}_{}__".format(p, self.manifest["parameters"][p])
+            sub_dir = sub_dir[:-2].lower()
+        else:
+            sub_dir = "no_parameters"
+        self.objdir = os.path.join(base_dir, self.manifest['toplevel'], sub_dir)
 
     def _get_makefile_vcs(self):
         pythonpath = os.path.abspath(os.path.dirname(__file__))
@@ -135,8 +91,8 @@ class CocotbTest:
 
         # HDL parameters (passed to toplevel module in the design)
         args_hdl_params = []
-        if len(self.test_combinations) > 0:
-            for name, value in self.test_combinations[self.testno-1].items():
+        if "parameters" in self.manifest:
+            for name, value in self.manifest["parameters"].items():
                 args_hdl_params.append("-pvalue+{}={}".format(self.manifest["toplevel"]+'.'+name, value))
 
         args_incdirs = []
@@ -180,7 +136,8 @@ class CocotbTest:
             tc_result = {}
             tc_result['failed'] = False
             tc_result['failuremsg'] = ''
-            tc_result['name'] = tc.get('classname') + '.' + tc.get('name')
+            tc_result['name'] = tc.get('classname') + '.' + tc.get('name') +\
+            ":" + os.path.basename(self.objdir)
 
             for failure in tc.iter("failure"):
                 tc_result['failuremsg'] += failure.get('stdout')
@@ -191,7 +148,9 @@ class CocotbTest:
 
         return {'any_failed': any_failed, 'results': results}
 
-    def run(self, gui, loglevel='INFO', seed=None, testcase=None, rebuild=False):
+    def run(self, gui, loglevel='INFO', seed=None, testcase=None):
+        self._prepare_objdir()
+
         env = os.environ
         env['PYTHONPATH'] = self.manifest['manifest_dir']
         env['COCOTB_LOG_LEVEL'] = loglevel
@@ -199,33 +158,17 @@ class CocotbTest:
         if testcase:
             env['TESTCASE'] = testcase
 
-        if self.testno > 1:
-            rebuild = True
+        make_args = []
+        sim_args = ""
+        if gui:
+            sim_args = "-gui"
 
-        if (gui or testcase) and self.testno > 1:
-            print("Running multiple tests at once is not possible with "
-                  "-g/--gui or -t/--testcase.\nPlease run again with a single "
-                  "test.")
-            exit(1)
+        make_args.append("SIM_ARGS=%s" % sim_args)
 
-        while self.testno > 0:
-            if rebuild:
-                subprocess.run(["rm", "-rf", self.objdir+"/sim_build"])
+        if seed:
+            make_args.append("RANDOM_SEED=%d" % seed)
 
-            self._prepare_objdir()
-            make_args = []
-            sim_args = ""
-            if gui:
-                sim_args = "-gui"
-
-            make_args.append("SIM_ARGS=%s" % sim_args)
-
-            if seed:
-                make_args.append("RANDOM_SEED=%d" % seed)
-
-            subprocess.run(["make"] + make_args, cwd=self.objdir, env=env)
-
-            self.testno -= 1
+        subprocess.run(["make"] + make_args, cwd=self.objdir, env=env)
 
         return self._collect_results()
 
@@ -234,7 +177,7 @@ class CocotbTestRunner:
         self.objdir = objdir
         self.tests = []
 
-    def run_tests(self, gui=False, loglevel='INFO', seed=None, testcase=None, rebuild=False):
+    def run_tests(self, gui=False, loglevel='INFO', seed=None, testcase=None):
         """
         Run all discovered tests
 
@@ -249,9 +192,9 @@ class CocotbTestRunner:
         all_tests_successful = True
         all_results = []
         for t in self.tests:
-            t.objdir = os.path.join(self.objdir, t.manifest['toplevel'])
+            t.set_objdir(base_dir=self.objdir)
             ensure_directory(t.objdir, recursive=True)
-            r = t.run(gui, loglevel, seed, testcase, rebuild)
+            r = t.run(gui, loglevel, seed, testcase)
             results = r['results']
             if r['any_failed']:
                 all_tests_successful = False
@@ -268,6 +211,49 @@ class CocotbTestRunner:
 
         return all_tests_successful
 
+    def _abspath(self, path, basedir):
+        """
+        Return the absolute path for |path| relative to |basedir| with all
+        environment variables expanded.
+        """
+        path = os.path.expandvars(path)
+
+        if path.startswith('/'):
+            return path
+        return os.path.abspath(os.path.join(basedir, path))
+
+    def parse_manifest(self, manifest_path):
+        with open(manifest_path, 'r') as fp_manifest:
+            try:
+                manifest = yaml.safe_load(fp_manifest)
+            except yaml.YAMLError as e:
+                print(e)
+                return False
+
+        # ensure absolute paths in the list of sources
+        manifest_dir = os.path.dirname(manifest_path)
+        manifest['sources'][:] = map(lambda x: self._abspath(x, manifest_dir),
+                                     manifest['sources'])
+        if 'include_dirs' in manifest:
+            manifest['include_dirs'][:] =\
+                map(lambda x: self._abspath(x, manifest_dir),
+                    manifest['include_dirs'])
+
+        manifest['manifest_dir'] = os.path.abspath(manifest_dir)
+
+        # read all HDL parameters (passed to toplevel module in the design)
+        parameters = {}
+        test_combinations = {}
+        if "parameters" in manifest:
+            for name, value in manifest["parameters"].items():
+                parameters[name] = value if type(value) is list else [value]
+
+            # create a list with all combinations of the parameters
+            param_names = sorted(parameters)
+            test_combinations = [dict(zip(param_names, prod)) for prod in it.product(*(parameters[param_name] for param_name in param_names))]
+
+        return manifest, test_combinations
+
     def discover_tests(self, search_base):
         self.tests = []
         if os.path.isfile(search_base):
@@ -277,8 +263,15 @@ class CocotbTestRunner:
             test_manifests = glob.iglob(search_expr, recursive=True)
 
         for f in test_manifests:
-            cocotb_test = CocotbTest(manifest_path=f)
-            self.tests.append(cocotb_test)
+            manifest, test_combinations = self.parse_manifest(manifest_path=f)
+            if len(test_combinations) > 0:
+                for t in test_combinations:
+                    manifest["parameters"] = t
+                    cocotb_test = CocotbTest(manifest_path=f, manifest=copy.deepcopy(manifest))
+                    self.tests.append(cocotb_test)
+            else:
+                cocotb_test = CocotbTest(manifest_path=f, manifest=copy.deepcopy(manifest))
+                self.tests.append(cocotb_test)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Testrunner for cocotb testbenches')
@@ -290,8 +283,6 @@ if __name__ == '__main__':
                         default='INFO')
     parser.add_argument("-g", "--gui", action='store_true',
                         help="show GUI[default: %(default)s]")
-    parser.add_argument("-f", "--force_build", action='store_true',
-                        help="force vcs to rebuild the module")
     parser.add_argument("--seed", type=int, required=False,
                         help="set a fixed seed for the test run")
     parser.add_argument("-t", "--testcase", required=False,
@@ -312,8 +303,7 @@ if __name__ == '__main__':
     all_tests_successful = testrunner.run_tests(gui=args.gui,
                                                 loglevel=args.loglevel,
                                                 seed=args.seed,
-                                                testcase=args.testcase,
-                                                rebuild=args.force_build)
+                                                testcase=args.testcase)
 
     if all_tests_successful:
         print("\nAll tests successful.")
