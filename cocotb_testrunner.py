@@ -124,7 +124,7 @@ class CocotbTest:
         try:
             tree = ET.parse(results_xml)
         except:
-            res = {'failed': True, 'name': self.manifest['module'],
+            res = {'failed': True, 'name': self.manifest['module'] + ":" + os.path.basename(self.objdir),
                    'failuremsg': 'No results.xml generated. Compilation error?'}
             return {'any_failed': True, 'results': [res]}
 
@@ -222,7 +222,7 @@ class CocotbTestRunner:
             return path
         return os.path.abspath(os.path.join(basedir, path))
 
-    def parse_manifest(self, manifest_path):
+    def parse_manifest(self, manifest_path, all_comb):
         with open(manifest_path, 'r') as fp_manifest:
             try:
                 manifest = yaml.safe_load(fp_manifest)
@@ -242,19 +242,24 @@ class CocotbTestRunner:
         manifest['manifest_dir'] = os.path.abspath(manifest_dir)
 
         # read all HDL parameters (passed to toplevel module in the design)
-        parameters = {}
-        test_combinations = {}
-        if "parameters" in manifest:
+        test_combinations = []
+        if "parameters" in manifest and (all_comb or "parameter_includes" not in manifest):
+            parameters = {}
             for name, value in manifest["parameters"].items():
                 parameters[name] = value if type(value) is list else [value]
-
             # create a list with all combinations of the parameters
             param_names = sorted(parameters)
             test_combinations = [dict(zip(param_names, prod)) for prod in it.product(*(parameters[param_name] for param_name in param_names))]
+        elif "parameter_includes" in manifest:
+            for d in manifest["parameter_includes"]:
+                parameters = {}
+                for name, value in d.items():
+                    parameters[name] = value
+                test_combinations.append(parameters)
 
         return manifest, test_combinations
 
-    def discover_tests(self, search_base):
+    def discover_tests(self, search_base, all_comb):
         self.tests = []
         if os.path.isfile(search_base):
             test_manifests = [ search_base ]
@@ -263,7 +268,8 @@ class CocotbTestRunner:
             test_manifests = glob.iglob(search_expr, recursive=True)
 
         for f in test_manifests:
-            manifest, test_combinations = self.parse_manifest(manifest_path=f)
+            manifest, test_combinations = self.parse_manifest(manifest_path=f, all_comb=all_comb)
+#            print("test_combinations: {}".format(test_combinations))
             if len(test_combinations) > 0:
                 for t in test_combinations:
                     manifest["parameters"] = t
@@ -283,6 +289,8 @@ if __name__ == '__main__':
                         default='INFO')
     parser.add_argument("-g", "--gui", action='store_true',
                         help="show GUI[default: %(default)s]")
+    parser.add_argument("-a", "--all", action='store_true',
+                        help="run tests for all possible parameter combinations")
     parser.add_argument("--seed", type=int, required=False,
                         help="set a fixed seed for the test run")
     parser.add_argument("-t", "--testcase", required=False,
@@ -294,7 +302,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     testrunner = CocotbTestRunner(objdir=args.objdir)
-    testrunner.discover_tests(args.dir_file)
+    testrunner.discover_tests(args.dir_file, args.all)
 
     if len(testrunner.tests) == 0:
         print("No test manifests (*.manifest.yaml) found in " + args.dir_file)
