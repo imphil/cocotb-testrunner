@@ -182,7 +182,7 @@ class CocotbTestRunner:
 
         for i in range(0,len(call_strings)):
             runtest = "run_test_{}".format(i+1)
-            logfile = " > {}.log 2>&1".format(runtest) if jobs else ""
+            logfile = " > {}/run.log 2>&1".format(call_strings[i].split(' ')[2]) if jobs else ""
             pre_run_message = "\n\t@echo running test {}...".format(i+1) if jobs else ""
             post_run_message = "\n\t@echo ...test {} finished.".format(i+1) if jobs else ""
             makefile_contents += "\n\n{}:{}".format(runtest, pre_run_message)
