@@ -102,7 +102,7 @@ class CocotbTest:
                 args_incdirs.append("+incdir+{}".format(incdir))
 
         sim_args = "+lint=all"
-        compile_args = "+lint=all -timescale=1ns/10ps " +\
+        compile_args = "+lint=all +vcs+lic+wait -timescale=1ns/10ps " +\
             ' '.join(args_hdl_params) + ' ' +\
             ' '.join(args_incdirs)
 
