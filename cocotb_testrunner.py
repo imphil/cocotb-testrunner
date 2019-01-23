@@ -84,7 +84,7 @@ class CocotbTest:
         Generate Makefile for running cocotb with Synopsys VCS
         """
         makefile = "# Auto-generated Makefile by cocotb_testrunner for Synopsys VCS\n"
-        makefile += "PYTHONPATH := " + pythonpath + ":" + self.manifest['manifest_dir'] + "$(PYTHONPATH)\n"
+        makefile += "PYTHONPATH := " + pythonpath + ":" + self.manifest['manifest_dir'] + ":$(PYTHONPATH)\n"
         makefile += "SIM=vcs\n"
         makefile += "VERILOG_SOURCES=" + " \\\n\t".join(self.manifest["sources"]) + "\n"
         makefile += "TOPLEVEL=" + self.manifest["toplevel"] + "\n"
